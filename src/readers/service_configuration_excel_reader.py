@@ -1,4 +1,4 @@
-from src.excel_reader import ExcelReader
+from src.readers.excel_reader import ExcelReader
 from pathlib import Path
 import pandas as pd
 

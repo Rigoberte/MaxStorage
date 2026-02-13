@@ -1,6 +1,6 @@
 import pandas as pd
 from pathlib import Path
-from src.excel_reader import ExcelReader
+from src.readers.excel_reader import ExcelReader
 from src.config import Config
 
 class PERIExcelReader(ExcelReader):

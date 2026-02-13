@@ -1,6 +1,6 @@
 def run_console():
     """Ejecuta el procesamiento en modo consola."""
-    from src.storage_service import StorageService
+    from src.core.storage_service import StorageService
     service = StorageService()
     result = service.process_all()
     service.save_results(result)
@@ -13,7 +13,7 @@ def run_console():
 
 def run_gui():
     """Ejecuta la interfaz gráfica."""
-    from src.gui import MaxStorageGUI
+    from src.gui.gui import MaxStorageGUI
     app = MaxStorageGUI()
     app.run()
 

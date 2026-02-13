@@ -3,12 +3,11 @@ import pandas as pd
 import os
 
 from src.config import Config
-from src.exchanges_rate import ExchangesRateExcelReader
-from src.service_configuration_excel_reader import ServiceConfigurationExcelReader
-from src.PERI_excel_reader import PERIExcelReader
-from src.price_calculator import PriceCalculator
-from src.max_calculator import MaxCalculator
-
+from src.readers.exchanges_rate_excel_reader import ExchangesRateExcelReader
+from src.readers.PERI_excel_reader import PERIExcelReader
+from src.readers.service_configuration_excel_reader import ServiceConfigurationExcelReader
+from src.core.price_calculator import PriceCalculator
+from src.core.max_calculator import MaxCalculator
 
 @dataclass
 class ProcessingResult:

@@ -1,14 +1,10 @@
-"""
-Interfaz gráfica para Max Storage Andina.
-"""
-
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import threading
 import sys
 from io import StringIO
 
-from src.storage_service import StorageService
+from src.core.storage_service import StorageService
 
 
 class Colors:

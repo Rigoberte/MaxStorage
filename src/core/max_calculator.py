@@ -1,7 +1,6 @@
 import pandas as pd
 from typing import Set
 
-
 class MaxCalculator:
     """
     Calculador de valores máximos por protocolo.
