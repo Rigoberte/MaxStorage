@@ -26,6 +26,9 @@ class Colors:
     FILE = "#64b5f6"
 
 
+# Lista de depósitos disponibles
+AVAILABLE_DEPOTS = ["PERI"]
+
 class MaxStorageGUI:
     """Interfaz gráfica para Max Storage Andina."""
     
@@ -37,6 +40,7 @@ class MaxStorageGUI:
         self.root.configure(bg=Colors.BG_DARK)
         
         self._is_running = False
+        self._selected_depot = tk.StringVar(value=AVAILABLE_DEPOTS[0])
         self._setup_styles()
         self._setup_ui()
     
@@ -97,6 +101,29 @@ class MaxStorageGUI:
             "Secondary.TButton",
             background=[("active", Colors.BG_MEDIUM)]
         )
+        
+        # Combobox
+        style.configure(
+            "Dark.TCombobox",
+            fieldbackground=Colors.BG_LIGHT,
+            background=Colors.BG_LIGHT,
+            foreground=Colors.FG_PRIMARY,
+            arrowcolor=Colors.FG_PRIMARY,
+            font=("Segoe UI", 10)
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", Colors.BG_LIGHT)],
+            selectbackground=[("readonly", Colors.ACCENT)],
+            selectforeground=[("readonly", "white")]
+        )
+        
+        # Configurar el dropdown del combobox
+        self.root.option_add("*TCombobox*Listbox.background", Colors.BG_LIGHT)
+        self.root.option_add("*TCombobox*Listbox.foreground", Colors.FG_PRIMARY)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", Colors.ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
     
     def _setup_ui(self):
         """Configura los elementos de la interfaz."""
@@ -112,9 +139,34 @@ class MaxStorageGUI:
         )
         title_label.pack(anchor=tk.W, pady=(0, 15))
         
+        # Frame de controles (selector + botones)
+        controls_frame = ttk.Frame(main_frame, style="Dark.TFrame")
+        controls_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Frame para selector de depósito
+        depot_frame = ttk.Frame(controls_frame, style="Dark.TFrame")
+        depot_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        depot_label = ttk.Label(
+            depot_frame,
+            text="Depósito:",
+            style="Dark.TLabel"
+        )
+        depot_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.depot_combo = ttk.Combobox(
+            depot_frame,
+            textvariable=self._selected_depot,
+            values=AVAILABLE_DEPOTS,
+            state="readonly",
+            style="Dark.TCombobox",
+            width=15
+        )
+        self.depot_combo.pack(side=tk.LEFT)
+        
         # Frame de botones
-        button_frame = ttk.Frame(main_frame, style="Dark.TFrame")
-        button_frame.pack(fill=tk.X, pady=(0, 15))
+        button_frame = ttk.Frame(controls_frame, style="Dark.TFrame")
+        button_frame.pack(side=tk.LEFT)
         
         # Botón para procesar reportes
         self.btn_process = ttk.Button(
@@ -213,6 +265,8 @@ class MaxStorageGUI:
         self._is_running = running
         state = tk.DISABLED if running else tk.NORMAL
         self.btn_process.config(state=state)
+        combo_state = "disabled" if running else "readonly"
+        self.depot_combo.config(state=combo_state)
         
         if running:
             self.progress_label.config(text="⏳ Procesando...")
@@ -232,9 +286,11 @@ class MaxStorageGUI:
     
     def _process_reports(self):
         """Procesa los reportes y muestra resultados."""
+        depot_name = self._selected_depot.get()
+        
         try:
             self._log("═" * 55, "header")
-            self._log("  INICIANDO PROCESAMIENTO", "header")
+            self._log(f"  INICIANDO PROCESAMIENTO - Depósito: {depot_name}", "header")
             self._log("═" * 55, "header")
             
             service = StorageService()
@@ -244,7 +300,7 @@ class MaxStorageGUI:
             sys.stdout = StringIO()
             
             try:
-                result = service.process_all()
+                result = service.process_all(depot_name)
                 
                 # Capturar output
                 output = sys.stdout.getvalue()

@@ -4,7 +4,7 @@ import os
 
 from src.config import Config
 from src.readers.exchanges_rate_excel_reader import ExchangesRateExcelReader
-from src.readers.PERI_excel_reader import PERIExcelReader
+from src.readers.depot_reader_factory import DepotReaderFactory
 from src.readers.service_configuration_excel_reader import ServiceConfigurationExcelReader
 from src.core.price_calculator import PriceCalculator
 from src.core.max_calculator import MaxCalculator
@@ -23,7 +23,8 @@ class StorageService:
     def __init__(self):
         self._exchange_reader = ExchangesRateExcelReader()
         self._service_config_reader: ServiceConfigurationExcelReader | None = None
-        self._depot_reader = PERIExcelReader()
+        self._depot_factory = DepotReaderFactory()
+        self._depot_reader = self._depot_factory.create_depot_reader("PERI")
         self._price_calculator: PriceCalculator | None = None
         self._max_calculator: MaxCalculator | None = None
     
@@ -109,13 +110,15 @@ class StorageService:
             return pd.DataFrame()
         return self._price_calculator.get_error_protocols()
     
-    def process_all(self) -> ProcessingResult:
+    def process_all(self, depot_name: str) -> ProcessingResult:
         """
         Ejecuta el flujo completo de procesamiento.
         
         Returns:
             ProcessingResult con todos los resultados
         """
+        self._depot_reader = self._depot_factory.create_depot_reader(depot_name)
+
         # Procesar reportes
         billing_reports, processed_files, skipped_files = self.process_depot_reports()
         

@@ -2,7 +2,7 @@ def run_console():
     """Ejecuta el procesamiento en modo consola."""
     from src.core.storage_service import StorageService
     service = StorageService()
-    result = service.process_all()
+    result = service.process_all("PERI")
     service.save_results(result)
     
     print(f"\nProcessed {len(result.processed_files)} files")
