@@ -1,73 +1,49 @@
-from src.PERI_excel_reader import PERIExcelReader
 import pandas as pd
-from pathlib import Path
-import os
+from typing import Set
+
 
 class MaxCalculator:
-    def __init__(self, folder_path: Path):
-        self.folder_path = Path(folder_path)
-        self.excel_reader = PERIExcelReader()
-        self.temp_max = pd.DataFrame()
-        self.protocols_with_errors = self._load_protocols_with_errors()
-        
-        # Diccionario para guardar el mejor TOTAL_PRICE por protocolo
-        self.best_protocol_totals = {}
+    """
+    Calculador de valores máximos por protocolo.
+    
+    Recibe reportes de facturación y mantiene el registro con el mayor
+    TOTAL_PRICE por protocolo.
+    """
+    
+    def __init__(self, protocols_with_errors: Set[str] | None = None):
+        self._max_values = pd.DataFrame()
+        self._protocols_with_errors = protocols_with_errors or set()
+        self._best_protocol_totals: dict[str, float] = {}
 
-    def _load_protocols_with_errors(self) -> set:
-        """Carga los protocolos con errores desde el archivo txt."""
-        file_path = Path(os.getcwd()) / "data" / "protocols_with_errors.txt"
-        try:
-            with open(file_path, 'r') as f:
-                return set(line.strip() for line in f if line.strip())
-        except FileNotFoundError:
-            return set()
-
-    def calculate_max(self) -> pd.DataFrame:
-        for file in self.folder_path.glob('*.xlsx'):
-            if not file.name.startswith("output_"):
-                continue
-
-            file_name = file.name
-            report = pd.read_excel(file)
-            
-            self.optimize_daily_report(report, file_name)
-        
-        return self.temp_max
+    def get_max_values(self) -> pd.DataFrame:
+        return self._max_values.copy()
     
     def optimize_daily_report(self, daily_report: pd.DataFrame, file_name: str) -> None:
-        """
-        Optimiza el reporte diario comparando protocolos por TOTAL_PRICE.
-        
-        Para cada protocolo en el reporte diario:
-        - Si está en protocols_with_errors, se salta
-        - Suma TOTAL_PRICE por protocolo
-        - Si es mayor que el guardado previamente, reemplaza todas las líneas del protocolo
-        
-        Args:
-            daily_report: DataFrame con los datos de un día específico
-            file_name: Nombre del archivo del reporte diario
-        """
         if daily_report.empty:
             return
         
         valid_protocols = daily_report[
-            ~daily_report['PROTOCOL'].isin(self.protocols_with_errors)
+            ~daily_report['PROTOCOL'].isin(self._protocols_with_errors)
         ]
         
         if valid_protocols.empty:
             return
         
-        # Obtener protocolos únicos del reporte
         unique_protocols = valid_protocols['PROTOCOL'].unique()
         
         for protocol in unique_protocols:
             protocol_rows = valid_protocols[valid_protocols['PROTOCOL'] == protocol]
             protocol_total = protocol_rows['TOTAL_PRICE'].sum()
             
-            if protocol not in self.best_protocol_totals or protocol_total > self.best_protocol_totals[protocol]:
-                self.best_protocol_totals[protocol] = protocol_total
+            if protocol not in self._best_protocol_totals or protocol_total > self._best_protocol_totals[protocol]:
+                self._best_protocol_totals[protocol] = protocol_total
                 
-                if not self.temp_max.empty:
-                    self.temp_max = self.temp_max[self.temp_max['PROTOCOL'] != protocol]
+                if not self._max_values.empty:
+                    self._max_values = self._max_values[self._max_values['PROTOCOL'] != protocol]
+
+                clean_file_name = file_name.replace("output_", "").replace(".xlsx", "")
                 
-                self.temp_max = pd.concat([self.temp_max, protocol_rows.assign(FILE_NAME=file_name)], ignore_index=True)
+                self._max_values = pd.concat(
+                    [self._max_values, protocol_rows.assign(FILE_NAME=clean_file_name)], 
+                    ignore_index=True
+                )

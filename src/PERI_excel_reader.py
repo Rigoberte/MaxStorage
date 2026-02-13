@@ -1,6 +1,7 @@
-from src.excel_reader import ExcelReader
-from pathlib import Path
 import pandas as pd
+from pathlib import Path
+from src.excel_reader import ExcelReader
+from src.config import Config
 
 class PERIExcelReader(ExcelReader):
     def __init__(self):
@@ -29,6 +30,12 @@ class PERIExcelReader(ExcelReader):
             "TT4": "Non-Drug",
             "Label": "Label"
         }
+
+        try:
+            self.protocols_renaming = pd.read_excel(Config.PROTOCOLS_RENAMING, sheet_name="PERI").set_index("Depot")["FisherBook"].to_dict()
+        except Exception as e:
+            print(f"Error loading protocols renaming file: {e}")
+            self.protocols_renaming = {}
 
     def _get_temperature_condition(self, ubicacion: str) -> str:
         """Determina la condición de temperatura basada en la ubicación."""
@@ -98,6 +105,9 @@ class PERIExcelReader(ExcelReader):
     def read_excel(self, file_path: Path) -> pd.DataFrame:
         try:
             df: pd.DataFrame = pd.read_excel(file_path)
+
+            # Renombrar protocolos según el archivo de renaming
+            df['PROTOCOLO'] = df['PROTOCOLO'].replace(self.protocols_renaming)
             
             # Asegurar que SALDO es numérico
             df['SALDO'] = pd.to_numeric(df['SALDO'], errors='coerce').fillna(0).astype('int64')
