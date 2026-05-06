@@ -1,11 +1,41 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk
 import threading
 import sys
-from io import StringIO
+import time
 
 from src.core.storage_service import StorageService
 
+
+class GUIOutputStream:
+    """
+    Stream personalizado que redirige stdout a la GUI en tiempo real.
+    Usa una cola thread-safe para comunicarse con el hilo principal.
+    """
+    
+    def __init__(self, gui_callback, root):
+        self.gui_callback = gui_callback
+        self.root = root
+        self.buffer = ""
+    
+    def write(self, text: str):
+        """Escribe texto al log de la GUI."""
+        if text.strip() != "":
+            # Acumular en buffer hasta encontrar newline
+            now = time.strftime("%H:%M:%S")
+            text = f"[{now}] {text}\n"
+            self.buffer += text
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                if line.strip():  # Solo si hay contenido
+                    # Usar after() para actualizar desde el hilo principal
+                    self.root.after(0, lambda l=line: self.gui_callback(l))
+    
+    def flush(self):
+        """Flush del buffer."""
+        if self.buffer.strip():
+            self.root.after(0, lambda l=self.buffer: self.gui_callback(l))
+            self.buffer = ""
 
 class Colors:
     """Paleta de colores para el tema oscuro."""
@@ -27,7 +57,7 @@ class Colors:
 
 
 # Lista de depósitos disponibles
-AVAILABLE_DEPOTS = ["PERI"]
+AVAILABLE_DEPOTS = ["PERI", "SIGNIA"]
 
 class MaxStorageGUI:
     """Interfaz gráfica para Max Storage Andina."""
@@ -284,6 +314,17 @@ class MaxStorageGUI:
         thread = threading.Thread(target=self._process_reports, daemon=True)
         thread.start()
     
+    def _log_stdout(self, message: str):
+        """Callback para logs desde stdout redirigido."""
+        if "Processing file:" in message:
+            self._log(message, "file")
+        elif "Error" in message or "ERROR" in message:
+            self._log(message, "error")
+        elif "Warning" in message or "WARNING" in message:
+            self._log(message, "warning")
+        else:
+            self._log(message, "normal")
+    
     def _process_reports(self):
         """Procesa los reportes y muestra resultados."""
         depot_name = self._selected_depot.get()
@@ -295,27 +336,19 @@ class MaxStorageGUI:
             
             service = StorageService()
             
-            # Redirigir stdout para capturar prints
+            # Redirigir stdout para mostrar prints en tiempo real
             old_stdout = sys.stdout
-            sys.stdout = StringIO()
+            sys.stdout = GUIOutputStream(self._log_stdout, self.root)
             
             try:
                 result = service.process_all(depot_name)
-                
-                # Capturar output
-                output = sys.stdout.getvalue()
-                if output:
-                    for line in output.strip().split('\n'):
-                        if "Processing file:" in line:
-                            self.root.after(0, lambda l=line: self._log(l, "file"))
-                        else:
-                            self.root.after(0, lambda l=line: self._log(l, "normal"))
             finally:
+                sys.stdout.flush()
                 sys.stdout = old_stdout
             
             # Guardar resultados
             self._log("\n💾 Guardando resultados...", "info")
-            service.save_results(result)
+            service.save_results(result, depot_name)
             
             # Mostrar resumen
             self._log("\n" + "═" * 55, "header")

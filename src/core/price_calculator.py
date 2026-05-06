@@ -1,10 +1,13 @@
 import pandas as pd
 import math
 from difflib import SequenceMatcher
+from src.core.error_solver import ErrorSolver
 
 class PriceCalculator:
-    def __init__(self, services_df: pd.DataFrame):
+    def __init__(self, services_df: pd.DataFrame, depot_name: str):
         self.services_df = services_df
+        self.depot_name = depot_name
+        
         self.transformation_matrix = pd.DataFrame(
             {
                 "Pallet" : {"Pallet": 1.0, "Shelf": 2.0, "Bin": 8.0},
@@ -15,42 +18,42 @@ class PriceCalculator:
         self.protocol_memo = {}
         self.service_memo = {}
 
-        self.protocols_with_errors = pd.DataFrame(columns=['PROTOCOL', 'MATCHED_PROTOCOL', 'PROTOCOL_ID', 'POTENTIAL_SERVICE', 'SERVICE_ID', 'DESCRIPTION', 'STORAGE_TYPE', 'AMOUNT_OF_KITS', 'DISTINCT_POSITIONS', 'ERROR', 'FILE_NAME'])
+        # Lista para acumular errores (más eficiente que concat en loop)
+        self._error_rows: list[dict] = []
+
+        self.error_solver = ErrorSolver(depot_name)
 
     def _add_protocol_with_error(self, 
-            inventory_protocol: str, matched_protocol: str, 
-            protocol_id: str, potential_service: str, 
-            service_id: str, description: str, 
+            inventory_protocol: str, matched_protocol: str | None, 
+            protocol_id: str | None, potential_service: str, 
+            service_id: str | None, description: str, 
             storage_type: str, amount_of_kits: int, distinct_positions: int,
-            error_message: str, file_name: str):
+            error_message: str, file_name: str) -> None:
+        """Agrega un registro de error a la lista de protocolos con errores."""
+        # Verificar si ya existe este error (evitar duplicados)
+        error_key = (inventory_protocol, potential_service, description, storage_type, error_message)
+        if any(
+            (r['PROTOCOL'], r['POTENTIAL_SERVICE'], r['DESCRIPTION'], r['STORAGE_TYPE'], r['ERROR']) == error_key
+            for r in self._error_rows
+        ):
+            return
         
-        if not (
-            (self.protocols_with_errors['PROTOCOL'] == inventory_protocol) & 
-            (self.protocols_with_errors['POTENTIAL_SERVICE'] == potential_service) & 
-            (self.protocols_with_errors['DESCRIPTION'] == description) &
-            (self.protocols_with_errors['STORAGE_TYPE'] == storage_type) &
-            (self.protocols_with_errors['ERROR'] == error_message)
-            ).any():
-
-            self.protocols_with_errors = pd.concat([
-                self.protocols_with_errors,
-                pd.DataFrame([{
-                    'PROTOCOL': inventory_protocol,
-                    'MATCHED_PROTOCOL': matched_protocol,
-                    'PROTOCOL_ID': protocol_id,
-                    'POTENTIAL_SERVICE': potential_service,
-                    'SERVICE_ID': service_id,
-                    'DESCRIPTION': description,
-                    'STORAGE_TYPE': storage_type,
-                    'AMOUNT_OF_KITS': amount_of_kits,
-                    'DISTINCT_POSITIONS': distinct_positions,
-                    'ERROR': error_message,
-                    'FILE_NAME': file_name
-                }])
-            ], ignore_index=True)
+        self._error_rows.append({
+            'PROTOCOL': inventory_protocol,
+            'MATCHED_PROTOCOL': matched_protocol,
+            'PROTOCOL_ID': protocol_id,
+            'POTENTIAL_SERVICE': potential_service,
+            'SERVICE_ID': service_id,
+            'DESCRIPTION': description,
+            'STORAGE_TYPE': storage_type,
+            'AMOUNT_OF_KITS': amount_of_kits,
+            'DISTINCT_POSITIONS': distinct_positions,
+            'ERROR': error_message,
+            'FILE_NAME': file_name
+        })
 
 
-    def _convertFromTo(self, amount_of_positions: int, from_type: str, to_type: str) -> int:
+    def _convert_from_to(self, amount_of_positions: int, from_type: str, to_type: str) -> int:
         """Convierte la cantidad de posiciones de un tipo a otro usando la matriz de transformación."""
         if from_type not in self.transformation_matrix.columns or to_type not in self.transformation_matrix.columns:
             raise ValueError(f"Invalid from_type '{from_type}' or to_type '{to_type}'. Valid types are: {self.transformation_matrix.columns.tolist()}")
@@ -81,11 +84,20 @@ class PriceCalculator:
                 protocol_name = row['Protocol']
                 protocol_id = row['Protocol ID']
                 max_similarity = similarity
+
+        if protocol_id == "":
+            protocol_id = self.error_solver.solve_protocol_error(inventory_protocol)
+            matched_row = self.services_df[self.services_df['Protocol ID'] == protocol_id]
+            if not matched_row.empty:
+                protocol_name = matched_row.iloc[0]['Protocol']
+
+        if protocol_id == "":
+            return ("", "")
         
         self.protocol_memo[inventory_protocol] = (protocol_name, protocol_id)
         return (protocol_name, protocol_id)
 
-    def _find_matching_service(self, protocol: str, potential_service: str) -> pd.Series | None:
+    def _find_matching_service(self, protocol: str, potential_service: str, description: str) -> pd.Series | None:
         """
         Busca el servicio que coincida con el protocolo y el servicio potencial.
         Retorna la fila del servicio encontrado o None.
@@ -114,190 +126,318 @@ class PriceCalculator:
             if similarity > best_score:
                 best_score = similarity
                 best_match = row
-        
+
+        if best_match is None:
+            resolved_service_id = self.error_solver.solve_service_id_error(protocol, description)
+            if resolved_service_id is not None:
+                best_row = protocol_services[protocol_services['Service ID'] == resolved_service_id]
+                if not best_row.empty:
+                    best_match = best_row.iloc[0]
+
+        if best_match is None:
+            return None
+
         self.service_memo[cache_key] = best_match
         return best_match
     
     def get_error_protocols(self) -> pd.DataFrame:
         """
-        Retorna una copia del DataFrame con los protocolos que tuvieron errores.
+        Retorna un DataFrame con los protocolos que tuvieron errores.
         
         Returns:
             DataFrame con los protocolos con errores
         """
-        return self.protocols_with_errors.copy()
+        if not self._error_rows:
+            return pd.DataFrame(columns=[
+                'PROTOCOL', 'MATCHED_PROTOCOL', 'PROTOCOL_ID', 'POTENTIAL_SERVICE',
+                'SERVICE_ID', 'DESCRIPTION', 'STORAGE_TYPE', 'AMOUNT_OF_KITS',
+                'DISTINCT_POSITIONS', 'ERROR', 'FILE_NAME'
+            ])
+        return pd.DataFrame(self._error_rows)
+
+    def _build_billing_row(
+        self,
+        inventory_protocol: str,
+        potential_service: str,
+        description: str,
+        storage_type: str,
+        amount_of_kits: int,
+        distinct_positions: int,
+        matched_protocol: str | None = None,
+        protocol_id: str | None = None,
+        service_id: str | None = None,
+        service_position_type: str | None = None,
+        converted_positions: int | None = None,
+        price_usd: float | None = None,
+        total_price: float | None = None,
+        error: str | None = None
+    ) -> dict:
+        """Construye un diccionario con los datos de una fila de facturación."""
+        return {
+            'PROTOCOL': inventory_protocol,
+            'MATCHED_PROTOCOL': matched_protocol,
+            'PROTOCOL_ID': protocol_id,
+            'POTENTIAL_SERVICE': potential_service,
+            'SERVICE_ID': service_id,
+            'DESCRIPTION': description,
+            'STORAGE_TYPE': storage_type,
+            'SERVICE_POSITION_TYPE': service_position_type,
+            'AMOUNT_OF_KITS': amount_of_kits,
+            'DISTINCT_POSITIONS': distinct_positions,
+            'CONVERTED_POSITIONS': converted_positions,
+            'PRICE_USD': price_usd,
+            'TOTAL_PRICE': total_price,
+            'ERROR': error
+        }
+
+    def _group_inventory_report(self, inventory_report_df: pd.DataFrame) -> pd.DataFrame:
+        """Agrupa el reporte de inventario por protocolo, servicio y tipo de storage."""
+        return inventory_report_df.groupby(
+            ['PROTOCOL', 'POTENTIAL_SERVICE', 'STORAGE_TYPE'],
+            as_index=False,
+            dropna=False
+        ).agg({
+            'AMOUNT_OF_KITS': 'sum',
+            'POSITION': 'nunique',
+            'DESCRIPTION': lambda x: '; '.join(x.dropna().unique()),
+            'ERROR': lambda x: '; '.join(x.dropna().unique()) if x.notna().any() else ''
+        }).rename(columns={'POSITION': 'DISTINCT_POSITIONS'})
+
+    def _process_row_with_previous_error(
+        self, row: pd.Series, file_name: str
+    ) -> dict | None:
+        """Procesa una fila que ya tiene un error previo. Retorna el resultado o None si no hay error."""
+        previous_error = row['ERROR']
+        if not (pd.notna(previous_error) and previous_error != ""):
+            return None
+        
+        billing_row = self._build_billing_row(
+            inventory_protocol=row['PROTOCOL'],
+            potential_service=row['POTENTIAL_SERVICE'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error=previous_error
+        )
+        self._add_protocol_with_error(
+            inventory_protocol=row['PROTOCOL'],
+            matched_protocol=None,
+            protocol_id=None,
+            potential_service=row['POTENTIAL_SERVICE'],
+            service_id=None,
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error_message=previous_error,
+            file_name=file_name
+        )
+        return billing_row
+
+    def _process_unmatched_protocol(
+        self, row: pd.Series, file_name: str
+    ) -> dict:
+        """Procesa una fila cuando no se encuentra protocolo coincidente."""
+        billing_row = self._build_billing_row(
+            inventory_protocol=row['PROTOCOL'],
+            potential_service=row['POTENTIAL_SERVICE'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error='No matching protocol found'
+        )
+        self._add_protocol_with_error(
+            inventory_protocol=row['PROTOCOL'],
+            matched_protocol=None,
+            protocol_id=None,
+            potential_service=row['POTENTIAL_SERVICE'],
+            service_id=None,
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error_message='No matching protocol found',
+            file_name=file_name
+        )
+        return billing_row
+
+    def _process_unmatched_service(
+        self,
+        row: pd.Series,
+        matched_protocol: str,
+        protocol_id: str,
+        file_name: str
+    ) -> dict:
+        """Procesa una fila cuando no se encuentra servicio coincidente."""
+        billing_row = self._build_billing_row(
+            inventory_protocol=row['PROTOCOL'],
+            potential_service=row['POTENTIAL_SERVICE'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            matched_protocol=matched_protocol,
+            protocol_id=protocol_id,
+            error='No matching service found'
+        )
+        self._add_protocol_with_error(
+            inventory_protocol=row['PROTOCOL'],
+            matched_protocol=matched_protocol,
+            protocol_id=protocol_id,
+            potential_service=row['POTENTIAL_SERVICE'],
+            service_id=None,
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error_message='No matching service found',
+            file_name=file_name
+        )
+        return billing_row
+
+    def _process_conversion_error(
+        self,
+        row: pd.Series,
+        matched_protocol: str,
+        protocol_id: str,
+        matching_service: pd.Series,
+        service_position_type: str,
+        error: ValueError,
+        file_name: str
+    ) -> dict:
+        """Procesa una fila cuando hay error en la conversión de posiciones."""
+        billing_row = self._build_billing_row(
+            inventory_protocol=row['PROTOCOL'],
+            potential_service=row['POTENTIAL_SERVICE'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            matched_protocol=matched_protocol,
+            protocol_id=protocol_id,
+            service_id=matching_service['Service ID'],
+            service_position_type=service_position_type,
+            price_usd=matching_service['Price_USD'],
+            error=str(error)
+        )
+        self._add_protocol_with_error(
+            inventory_protocol=row['PROTOCOL'],
+            matched_protocol=matched_protocol,
+            protocol_id=protocol_id,
+            potential_service=row['POTENTIAL_SERVICE'],
+            service_id=matching_service['Service ID'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            error_message=str(error),
+            file_name=file_name
+        )
+        return billing_row
+
+    def _process_successful_row(
+        self,
+        row: pd.Series,
+        matched_protocol: str,
+        protocol_id: str,
+        matching_service: pd.Series,
+        service_position_type: str,
+        converted_positions: int
+    ) -> dict:
+        """Procesa una fila exitosa con todos los cálculos completados."""
+        price_usd = matching_service['Price_USD']
+        total_price = converted_positions * price_usd if pd.notna(price_usd) else None
+        
+        return self._build_billing_row(
+            inventory_protocol=row['PROTOCOL'],
+            potential_service=row['POTENTIAL_SERVICE'],
+            description=row['DESCRIPTION'],
+            storage_type=row['STORAGE_TYPE'],
+            amount_of_kits=row['AMOUNT_OF_KITS'],
+            distinct_positions=row['DISTINCT_POSITIONS'],
+            matched_protocol=matched_protocol,
+            protocol_id=protocol_id,
+            service_id=matching_service['Service ID'],
+            service_position_type=service_position_type,
+            converted_positions=converted_positions,
+            price_usd=price_usd,
+            total_price=total_price
+        )
+
+    def _process_grouped_row(self, row: pd.Series, file_name: str) -> dict:
+        """
+        Procesa una fila agrupada del reporte de inventario.
+        
+        Retorna un diccionario con los datos de facturación.
+        """
+        if row['PROTOCOL'] == "MATERIALES":
+            pass
+        
+        # Verificar si hay error previo
+        error_row = self._process_row_with_previous_error(row, file_name)
+        if error_row is not None:
+            return error_row
+        
+
+        # Buscar protocolo coincidente
+        matched_protocol, protocol_id = self._find_best_protocol_match(row['PROTOCOL'])
+        
+        if matched_protocol == "":
+            return self._process_unmatched_protocol(row, file_name)
+        
+        # Buscar servicio coincidente
+        matching_service = self._find_matching_service(matched_protocol, row['POTENTIAL_SERVICE'], row['DESCRIPTION'])
+        
+        if matching_service is None:
+            return self._process_unmatched_service(row, matched_protocol, protocol_id, file_name)
+        
+        # Intentar conversión de posiciones
+        service_position_type = matching_service['Position Type']
+        try:
+            converted_positions = self._convert_from_to(
+                row['DISTINCT_POSITIONS'],
+                row['STORAGE_TYPE'],
+                service_position_type
+            )
+        except ValueError as e:
+            return self._process_conversion_error(
+                row, matched_protocol, protocol_id,
+                matching_service, service_position_type, e, file_name
+            )
+        
+        # Éxito: calcular precio
+        return self._process_successful_row(
+            row, matched_protocol, protocol_id,
+            matching_service, service_position_type, converted_positions
+        )
 
     def calculate_storage_billing(self, inventory_report_df: pd.DataFrame, file_name: str) -> pd.DataFrame:
         """
         Procesa el reporte de depósito para calcular la facturación de almacenamiento.
         
-        1. Agrupa los registros por PROTOCOL, POTENTIAL_SERVICE, STORAGE_TYPE, DESCRIPTION
-            sumando AMOUNT_OF_KITS y contando posiciones distintas (POSITION).
-        2. Busca el protocolo más parecido en la configuración de servicios.
-        3. Identifica el servicio exacto y recupera el Protocol ID.
-        4. Aplica la matriz de conversión para transformar el tipo de storage.
-        5. Calcula el precio multiplicando las posiciones convertidas por Price_USD.
+        Pasos:
+        1. Agrupa los registros por PROTOCOL, POTENTIAL_SERVICE, STORAGE_TYPE
+        2. Busca el protocolo más parecido en la configuración de servicios
+        3. Identifica el servicio exacto y recupera el Protocol ID
+        4. Aplica la matriz de conversión para transformar el tipo de storage
+        5. Calcula el precio multiplicando las posiciones convertidas por Price_USD
         
+        Args:
+            inventory_report_df: DataFrame con el reporte de inventario
+            file_name: Nombre del archivo para tracking de errores
+            
         Returns:
-            DataFrame con el detalle de facturación.
+            DataFrame con el detalle de facturación
         """
         if inventory_report_df.empty:
             return pd.DataFrame()
         
-        # Paso 1: Agrupar por PROTOCOL, POTENTIAL_SERVICE, STORAGE_TYPE, DESCRIPTION
-        grouped = inventory_report_df.groupby(
-            ['PROTOCOL', 'POTENTIAL_SERVICE', 'STORAGE_TYPE'], #, 'DESCRIPTION'],
-            as_index=False,
-            dropna=False
-        ).agg({
-            'AMOUNT_OF_KITS': 'sum',
-            'POSITION': 'nunique',  # Count distinct positions
-            'DESCRIPTION': lambda x: '; '.join(x.dropna().unique())  # Keep descriptions as a list
-        }).rename(columns={'POSITION': 'DISTINCT_POSITIONS'})
-        
-        # Preparar columnas de resultado
-        result_rows = []
-        
-        for _, row in grouped.iterrows():
-            inventory_protocol = row['PROTOCOL']
-            potential_service = row['POTENTIAL_SERVICE']
-            storage_type = row['STORAGE_TYPE']
-            description = row['DESCRIPTION']
-            amount_of_kits = row['AMOUNT_OF_KITS']
-            distinct_positions = row['DISTINCT_POSITIONS']
-            
-            # Paso 2: Buscar el protocolo más parecido
-            matched_protocol, protocol_id = self._find_best_protocol_match(inventory_protocol)
-
-            if matched_protocol == "":
-                new_row = {
-                    'PROTOCOL': inventory_protocol,
-                    'MATCHED_PROTOCOL': None,
-                    'PROTOCOL_ID': None,
-                    'POTENTIAL_SERVICE': potential_service,
-                    'SERVICE_ID': None,
-                    'DESCRIPTION': description,
-                    'STORAGE_TYPE': storage_type,
-                    'SERVICE_POSITION_TYPE': None,
-                    'AMOUNT_OF_KITS': amount_of_kits,
-                    'DISTINCT_POSITIONS': distinct_positions,
-                    'CONVERTED_POSITIONS': None,
-                    'PRICE_USD': None,
-                    'TOTAL_PRICE': None,
-                    'ERROR': 'No matching protocol found'
-                }
-                
-                result_rows.append(new_row)
-                self._add_protocol_with_error(
-                    inventory_protocol=inventory_protocol,
-                    matched_protocol=None,
-                    protocol_id=None,
-                    potential_service=potential_service,
-                    service_id=None,
-                    description=description,
-                    storage_type=storage_type,
-                    amount_of_kits=amount_of_kits,
-                    distinct_positions=distinct_positions,
-                    error_message='No matching protocol found',
-                    file_name=file_name
-                )
-                continue
-            
-            # Paso 3: Identificar el servicio exacto
-            matching_service = self._find_matching_service(matched_protocol, potential_service)
-            
-            if matching_service is None:
-                result_rows.append({
-                    'PROTOCOL': inventory_protocol,
-                    'MATCHED_PROTOCOL': matched_protocol,
-                    'PROTOCOL_ID': protocol_id,
-                    'POTENTIAL_SERVICE': potential_service,
-                    'SERVICE_ID': None,
-                    'DESCRIPTION': description,
-                    'STORAGE_TYPE': storage_type,
-                    'SERVICE_POSITION_TYPE': None,
-                    'AMOUNT_OF_KITS': amount_of_kits,
-                    'DISTINCT_POSITIONS': distinct_positions,
-                    'CONVERTED_POSITIONS': None,
-                    'PRICE_USD': None,
-                    'TOTAL_PRICE': None,
-                    'ERROR': 'No matching service found'
-                })
-                self._add_protocol_with_error(
-                    inventory_protocol=inventory_protocol,
-                    matched_protocol=matched_protocol,
-                    protocol_id=protocol_id,
-                    potential_service=potential_service,
-                    service_id=None,
-                    description=description,
-                    storage_type=storage_type,
-                    amount_of_kits=amount_of_kits,
-                    distinct_positions=distinct_positions,
-                    error_message='No matching service found',
-                    file_name=file_name
-                )
-                continue
-            
-            # Paso 4: Aplicar matriz de conversión
-            service_position_type = matching_service['Position Type']
-            
-            try:
-                converted_positions = self._convertFromTo(
-                    distinct_positions, 
-                    storage_type, 
-                    service_position_type
-                )
-            except ValueError as e:
-                result_rows.append({
-                    'PROTOCOL': inventory_protocol,
-                    'MATCHED_PROTOCOL': matched_protocol,
-                    'PROTOCOL_ID': protocol_id,
-                    'POTENTIAL_SERVICE': potential_service,
-                    'SERVICE_ID': matching_service['Service ID'],
-                    'DESCRIPTION': description,
-                    'STORAGE_TYPE': storage_type,
-                    'SERVICE_POSITION_TYPE': service_position_type,
-                    'AMOUNT_OF_KITS': amount_of_kits,
-                    'DISTINCT_POSITIONS': distinct_positions,
-                    'CONVERTED_POSITIONS': None,
-                    'PRICE_USD': matching_service['Price_USD'],
-                    'TOTAL_PRICE': None,
-                    'ERROR': str(e)
-                })
-                self._add_protocol_with_error(
-                    inventory_protocol=inventory_protocol,
-                    matched_protocol=matched_protocol,
-                    protocol_id=protocol_id,
-                    potential_service=potential_service,
-                    service_id=matching_service['Service ID'],
-                    description=description,
-                    storage_type=storage_type,
-                    amount_of_kits=amount_of_kits,
-                    distinct_positions=distinct_positions,
-                    error_message=str(e),
-                    file_name=file_name
-                )
-                continue
-            
-            # Paso 5: Calcular el precio
-            price_usd = matching_service['Price_USD']
-            total_price = converted_positions * price_usd if pd.notna(price_usd) else None
-            
-            result_rows.append({
-                'PROTOCOL': inventory_protocol,
-                'MATCHED_PROTOCOL': matched_protocol,
-                'PROTOCOL_ID': protocol_id,
-                'POTENTIAL_SERVICE': potential_service,
-                'SERVICE_ID': matching_service['Service ID'],
-                'DESCRIPTION': description,
-                'STORAGE_TYPE': storage_type,
-                'SERVICE_POSITION_TYPE': service_position_type,
-                'AMOUNT_OF_KITS': amount_of_kits,
-                'DISTINCT_POSITIONS': distinct_positions,
-                'CONVERTED_POSITIONS': converted_positions,
-                'PRICE_USD': price_usd,
-                'TOTAL_PRICE': total_price,
-                'ERROR': None
-            })
+        grouped = self._group_inventory_report(inventory_report_df)
+        result_rows = [
+            self._process_grouped_row(row, file_name)
+            for _, row in grouped.iterrows()
+        ]
         
         return pd.DataFrame(result_rows)

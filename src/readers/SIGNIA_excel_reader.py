@@ -3,25 +3,21 @@ from pathlib import Path
 from src.readers.excel_reader import ExcelReader
 from src.config import Config
 
-class PERIExcelReader(ExcelReader):
+class SIGNIAExcelReader(ExcelReader):
     def __init__(self):
         self.lot_status_replacements = {
-            "BLOQUEADO": "Expired",
+            "BAJAS": "Expired",
             "CUARENTENA": "Quarantine",
-            "DEVOLUCION": "Expired",
-            "LIBERADO": "Approved",
-            "RECHAZADO": "Expired",
-            "RECHAZADOE": "Expired",
-            "VENCIDO": "Expired"
+            "DEVOLUCIONES": "Expired",
+            "DISPONIBLE": "Approved",
+            "VENCIMIENTO CERCANO": "Approved"
         }
         
-        self.item_type_replacements = {
-            "material": "CREDOs",
-            "materiales": "Ancillaries",
-            "medicación": "Medication",
-            "monitores": "TT4",
-            "retorno": "Medication"
-        }
+        try:
+            self.item_type_replacements = pd.read_excel(Config.ITEM_TYPE_REPLACEMENTS, sheet_name="SIGNIA").set_index("ITEM DESCRIPTION")["ITEM_TYPE"].to_dict()
+        except Exception as e:
+            print(f"Error loading item type replacements file: {e}")
+            self.item_type_replacements = {}
 
         self.type_replacements = {
             "Medication": "Drug",
@@ -31,53 +27,24 @@ class PERIExcelReader(ExcelReader):
             "Label": "Label"
         }
 
+        self.temperature_replacements = {
+            "DE 15°C A 25°C": "Ambient",
+            "REFRIGERADO (DE 2°C A 8°C)": "Refrigerated"
+        }
+
         try:
-            self.protocols_renaming = pd.read_excel(Config.PROTOCOLS_RENAMING, sheet_name="PERI").set_index("Depot")["FisherBook"].to_dict()
+            self.protocols_renaming = pd.read_excel(Config.PROTOCOLS_RENAMING, sheet_name="SIGNIA").set_index("Depot")["FisherBook"].to_dict()
         except Exception as e:
             print(f"Error loading protocols renaming file: {e}")
             self.protocols_renaming = {}
 
-    def _get_temperature_condition(self, ubicacion: str) -> str:
-        """Determina la condición de temperatura basada en la ubicación."""
-        if pd.isna(ubicacion):
-            return ""
-        
-        ubicacion = str(ubicacion)
-        if ubicacion.startswith("EFR"):
-            return "Refrigerated"
-        elif ubicacion.startswith("EF"):
-            return "Ambient"
-        elif ubicacion.startswith("L"):
-            return "Ambient"
-        elif ubicacion.startswith("MG"):
-            return "Frozen"
-        return ""
-
-    def _get_storage_type(self, ubicacion: str, temperatura: str) -> str:
-        """Determina el tipo de posición basado en la ubicación y temperatura."""
-        if pd.isna(ubicacion):
-            return ""
-        
-        ubicacion = str(ubicacion)
-        if temperatura == "Frozen":
-            return "Shelf"
-        elif ubicacion.startswith("EF"):
-            return "Bin"
-        elif ubicacion.startswith("L"):
+    def _get_storage_type(self, is_a_return: bool) -> str:
+        """Determina el tipo de posición basado si es una devolución o no."""
+        if is_a_return:
             return "Pallet"
-        return ""
+        
+        return "Bin"
 
-    def _extract_item_type(self, linea: str) -> str:
-        """Extrae el texto antes del primer espacio, lo convierte a minúsculas y aplica reemplazos."""
-        if pd.isna(linea):
-            return ""
-        linea = str(linea).strip()
-        
-        before_delimiter = linea.split(" ")[0] if " " in linea else linea
-        item_type = before_delimiter.lower().strip()
-        
-        return self.item_type_replacements.get(item_type, item_type)
-    
     def _potential_description(self, general_type: str, temperature: str, is_a_return: bool) -> str:
         """Genera la descripción del servicio basado en el tipo, temperatura y si es una devolución."""
         if is_a_return:
@@ -109,41 +76,47 @@ class PERIExcelReader(ExcelReader):
             # Renombrar protocolos según el archivo de renaming
             df['PROTOCOLO'] = df['PROTOCOLO'].replace(self.protocols_renaming)
             
-            # Asegurar que SALDO es numérico
-            df['SALDO'] = pd.to_numeric(df['SALDO'], errors='coerce').fillna(0).astype('int64')
+            # Asegurar que SALDO_TOTAL es numérico
+            df['SALDO_TOTAL'] = pd.to_numeric(df['SALDO_TOTAL'], errors='coerce').fillna(0).astype('int64')
             
+            df['ITEM_TYPE'] = df['DESCRPCION_PRODUCTO'].map(self.item_type_replacements).fillna('')
+            df['ERROR'] = df[df['ITEM_TYPE'] == '']['DESCRPCION_PRODUCTO'].apply(lambda x: f"Item type '{x}' not found in replacements")
+
             rename_map = {
                 "PROTOCOLO": "PROTOCOL",
-                "LINEA": "ITEM_TYPE",
-                "ESTADO STOCK": "LOT_STATUS",
-                "CLIENTE": "COMPONENT",
-                "UBICACIÓN": "POSITION",
-                'SALDO': 'AMOUNT_OF_KITS'
+                "DES_ALMACEN": "LOT_STATUS",
+                "UBICACION": "POSITION",
+                "TEMPERATURA" : "TEMPERATURE",
+                'SALDO_TOTAL': 'AMOUNT_OF_KITS',
+                'ITEM_TYPE' : 'ITEM_TYPE'
             }
             
-            # Agrupar por columnas y sumar SALDO
-            df = df.groupby(list(rename_map.keys()), as_index=False, dropna=False).agg({'SALDO': 'sum'})
+            # Agrupar por columnas y sumar SALDO_TOTAL
+            df = df.groupby(list(rename_map.keys()), as_index=False, dropna=False).agg(
+                {
+                    'SALDO_TOTAL': 'sum',
+                    'ERROR': lambda x: '; '.join(x.dropna().unique()) if x.notna().any() else ''
+                }
+            )
             
             df.rename(columns=rename_map, inplace=True)
             
-            df['TEMPERATURE'] = df['POSITION'].apply(self._get_temperature_condition)
+            df['TEMPERATURE'] = df['TEMPERATURE'].replace(self.temperature_replacements)
             
             df = df[df['PROTOCOL'].notna()]
             
+            df['IS_A_RETURN'] = df['LOT_STATUS'] == "DEVOLUCIONES"
             df['STORAGE_TYPE'] = df.apply(
-                lambda row: self._get_storage_type(row['POSITION'], row['TEMPERATURE']), 
+                lambda row: self._get_storage_type(row['IS_A_RETURN']), 
                 axis=1
             )
             
-            columns_to_keep = ["PROTOCOL", "ITEM_TYPE", "LOT_STATUS", "TEMPERATURE", "STORAGE_TYPE", "POSITION", "AMOUNT_OF_KITS"]
+            columns_to_keep = ["PROTOCOL", "ITEM_TYPE", "LOT_STATUS", "TEMPERATURE", "STORAGE_TYPE", "POSITION", "AMOUNT_OF_KITS", "IS_A_RETURN", "ERROR"]
             
             df = df[columns_to_keep].copy()
             
-            df['IS_A_RETURN'] = df['LOT_STATUS'] == "DEVOLUCION"
             df['LOT_STATUS'] = df['LOT_STATUS'].replace(self.lot_status_replacements)
-            df['ITEM_TYPE'] = df['ITEM_TYPE'].apply(self._extract_item_type)
             df['GENERAL_TYPE'] = df['ITEM_TYPE'].replace(self.type_replacements)
-            
             df['AMOUNT_OF_KITS'] = pd.to_numeric(df['AMOUNT_OF_KITS'], errors='coerce').fillna(0).astype('int64')
 
             df['POTENTIAL_SERVICE'] = df.apply(
@@ -155,8 +128,6 @@ class PERIExcelReader(ExcelReader):
                 lambda row: self._service_description(row.get('LOT_STATUS', ''), row.get('ITEM_TYPE', ''), row.get('TEMPERATURE', ''), row.get('IS_A_RETURN', False)),
                 axis=1
             )
-
-            df['ERROR'] = ""
             
             return df
             

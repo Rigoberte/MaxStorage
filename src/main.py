@@ -3,7 +3,7 @@ def run_console():
     from src.core.storage_service import StorageService
     service = StorageService()
     result = service.process_all("PERI")
-    service.save_results(result)
+    service.save_results(result, "PERI")
     
     print(f"\nProcessed {len(result.processed_files)} files")
     print(f"Skipped {len(result.skipped_files)} files" + f" ({', '.join(result.skipped_files)})" if result.skipped_files else "")

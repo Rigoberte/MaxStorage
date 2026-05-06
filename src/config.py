@@ -13,7 +13,5 @@ class Config:
     EXCHANGE_RATE_PATH = CONFIGS_FOLDER / "exchanges_rate.xlsx"
     SERVICE_CONFIG_PATH = CONFIGS_FOLDER / "Services - Configuration.xlsx"
     PROTOCOLS_RENAMING = CONFIGS_FOLDER / "protocols_renaming.xlsx"
-
-    # Archivos de salida
-    PROTOCOLS_WITH_ERRORS_PATH = DATA_FOLDER / "protocols_with_errors.xlsx"
-    MAX_VALUES_OUTPUT_PATH = DATA_FOLDER / "max_values.xlsx"
+    ITEM_TYPE_REPLACEMENTS = CONFIGS_FOLDER / "item_types.xlsx"
+    ERROR_SOLVER_PATH = CONFIGS_FOLDER / "solution_of_errors.xlsx"
