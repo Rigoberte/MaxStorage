@@ -124,6 +124,7 @@ StockThermoFisher_ST_*.xls
 
 The application generates:
 
-- **`data/max_values.xlsx`**: Maximum billing values per protocol
+- **`data/max_values_<depot>.xlsx`**: Single workbook with `Max Values`, `Import File`, and `Report` sheets
+    - `Report` contains the consolidated depot report detail for the protocols selected as daily maxima
 - **`data/protocols_with_errors.xlsx`**: Protocols with configuration issues
 - **`data/processed_reports/`**: Individual processed billing reports

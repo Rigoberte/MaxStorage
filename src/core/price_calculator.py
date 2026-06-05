@@ -110,7 +110,7 @@ class PriceCalculator:
             return self.service_memo[cache_key]
         
         # Filtrar por protocolo
-        protocol_services = self.services_df[self.services_df['Protocol'] == protocol]
+        protocol_services = self.services_df[(self.services_df['Protocol'] == protocol) & (self.services_df['Service Status'] == 'Active')]
         
         if protocol_services.empty:
             return None
@@ -193,13 +193,13 @@ class PriceCalculator:
     def _group_inventory_report(self, inventory_report_df: pd.DataFrame) -> pd.DataFrame:
         """Agrupa el reporte de inventario por protocolo, servicio y tipo de storage."""
         return inventory_report_df.groupby(
-            ['PROTOCOL', 'POTENTIAL_SERVICE', 'STORAGE_TYPE'],
+            ['PROTOCOL', 'POTENTIAL_SERVICE', 'STORAGE_TYPE', 'DESCRIPTION'],
             as_index=False,
             dropna=False
         ).agg({
             'AMOUNT_OF_KITS': 'sum',
             'POSITION': 'nunique',
-            'DESCRIPTION': lambda x: '; '.join(x.dropna().unique()),
+            # 'DESCRIPTION': lambda x: '; '.join(x.dropna().unique()),
             'ERROR': lambda x: '; '.join(x.dropna().unique()) if x.notna().any() else ''
         }).rename(columns={'POSITION': 'DISTINCT_POSITIONS'})
 

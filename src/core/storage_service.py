@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import pandas as pd
 import os
+from pathlib import Path
+from datetime import date
 
 from src.config import Config
 from src.readers.excel_reader import ExcelReader
@@ -28,6 +30,8 @@ class ProcessingResult:
     billing_reports: dict[str, pd.DataFrame]
     error_protocols: pd.DataFrame
     max_values: pd.DataFrame
+    selected_report: pd.DataFrame
+    import_file: pd.DataFrame
     processed_files: list[str]
     skipped_files: list[str]
 
@@ -131,6 +135,120 @@ class StorageService:
             )
         
         return self._max_calculator.get_max_values()
+
+    def _build_selected_report(self, max_values: pd.DataFrame) -> pd.DataFrame:
+        """Lee los archivos originales de depot_reports sin procesar, por cada FILE_NAME en max_values, una sola vez."""
+        if max_values.empty or "FILE_NAME" not in max_values.columns:
+            return pd.DataFrame()
+
+        selected_frames: list[pd.DataFrame] = []
+        unique_files = max_values["FILE_NAME"].dropna().unique()
+
+        for file_name in unique_files:
+            file_path = self._find_depot_report_file(file_name)
+            if file_path is None:
+                continue
+
+            # Leer directamente con pandas sin aplicar transformaciones del depot_reader
+            try:
+                source_report = pd.read_excel(file_path)
+            except Exception as e:
+                print(f"Error reading depot report {file_path}: {e}")
+                continue
+
+            if source_report is None or source_report.empty:
+                continue
+
+            # Obtener los protocolos para este archivo según max_values
+            selected_protocols = set(
+                max_values[max_values["FILE_NAME"] == file_name]["PROTOCOL"].dropna().unique()
+            )
+            if not selected_protocols:
+                continue
+
+            # Buscar la columna de protocolo (puede variar según el formato)
+            protocol_col = self._find_protocol_column(source_report)
+            if protocol_col is None:
+                continue
+
+            selected_source = source_report[source_report[protocol_col].isin(selected_protocols)].copy()
+            if selected_source.empty:
+                continue
+
+            selected_source.insert(0, "FILE_NAME", file_name)
+            selected_frames.append(selected_source)
+
+        if not selected_frames:
+            return pd.DataFrame()
+
+        return pd.concat(selected_frames, ignore_index=True)
+
+    def _build_import_file(self, max_values: pd.DataFrame) -> pd.DataFrame:
+        """Construye la hoja de importación a partir del reporte seleccionado."""
+        # Columnas objetivo del archivo de importación
+        out_cols = [
+            "protocolID",
+            "serviceID",
+            "eventHistoryApplyDate",
+            "eventHistoryDescription",
+            "eventHistoryQtyDescription",
+            "eventHistoryStorageType",
+            "eventHistoryUOM",
+        ]
+
+        if max_values.empty:
+            return pd.DataFrame(columns=out_cols)
+
+        # Fecha de aplicación: día 15 del mes actual
+        apply_date = date.today().replace(day=15)
+        apply_date_str = apply_date.strftime("%d-%m-%Y")
+
+        src = max_values
+
+        # Preparar columnas fuente con nombres esperados (si faltan, quedan NaN)
+        protocol_id = src.get("PROTOCOL_ID") if "PROTOCOL_ID" in src.columns else pd.Series([pd.NA] * len(src))
+        service_id = src.get("SERVICE_ID") if "SERVICE_ID" in src.columns else pd.Series([pd.NA] * len(src))
+        description = src.get("DESCRIPTION") if "DESCRIPTION" in src.columns else pd.Series([pd.NA] * len(src))
+        amount_of_kits = src.get("AMOUNT_OF_KITS") if "AMOUNT_OF_KITS" in src.columns else pd.Series([pd.NA] * len(src))
+        storage_type = src.get("STORAGE_TYPE") if "STORAGE_TYPE" in src.columns else pd.Series([pd.NA] * len(src))
+        distinct_positions = src.get("DISTINCT_POSITIONS") if "DISTINCT_POSITIONS" in src.columns else pd.Series([pd.NA] * len(src))
+
+        out = pd.DataFrame({
+            "protocolID": protocol_id.values,
+            "serviceID": service_id.values,
+            "eventHistoryApplyDate": [apply_date_str] * len(src),
+            "eventHistoryDescription": description.values,
+            "eventHistoryQtyDescription": amount_of_kits.values,
+            "eventHistoryStorageType": storage_type.values,
+            "eventHistoryUOM": distinct_positions.values,
+        })
+
+        return out[out_cols]
+    
+    def _find_depot_report_file(self, file_name: str) -> Path | None:
+        """Encuentra el archivo en depot_reports que corresponde al file_name."""
+        if not Config.DEPOT_REPORTS_FOLDER.exists():
+            return None
+
+        pattern = FILE_PATTERNS.get(self._country_name)
+        if pattern is None:
+            return None
+
+        _, file_extension = pattern
+        potential_file = Config.DEPOT_REPORTS_FOLDER / f"{file_name}{file_extension}"
+
+        if potential_file.exists():
+            return potential_file
+
+        return None
+
+    def _find_protocol_column(self, df: pd.DataFrame) -> str | None:
+        """Detecta el nombre de la columna de protocolo en el DataFrame."""
+        possible_names = ["PROTOCOLO", "PROTOCOL"]
+        for col_name in possible_names:
+            if col_name in df.columns:
+                return col_name
+        return None
     
     def get_error_protocols(self) -> pd.DataFrame:
         """Retorna los protocolos con errores."""
@@ -160,11 +278,15 @@ class StorageService:
         
         # Calcular máximos
         max_values = self.calculate_max_values(billing_reports, error_protocols)
+        selected_report = self._build_selected_report(max_values)
+        import_file = self._build_import_file(max_values)
         
         return ProcessingResult(
             billing_reports=billing_reports,
             error_protocols=error_protocols,
             max_values=max_values,
+            selected_report=selected_report,
+            import_file=import_file,
             processed_files=processed_files,
             skipped_files=skipped_files
         )
@@ -211,11 +333,14 @@ class StorageService:
             except Exception as e:
                 print(f"Error saving error protocols file {error_path}: {e}")
         
-        # Guardar valores máximos
+        # Guardar valores máximos y hojas auxiliares en un único workbook
         max_path = Config.DATA_FOLDER / f"max_values_{depot_name}.xlsx"
         if max_path.exists():
             max_path.unlink()
         try:
-            result.max_values.to_excel(max_path, index=False)
+            with pd.ExcelWriter(max_path) as writer:
+                result.max_values.to_excel(writer, sheet_name="Max Values", index=False)
+                result.import_file.to_excel(writer, sheet_name="Import File", index=False)
+                result.selected_report.to_excel(writer, sheet_name="Report", index=False)
         except Exception as e:
             print(f"Error saving max values file {max_path}: {e}")

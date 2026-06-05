@@ -23,7 +23,7 @@ class ServiceConfigurationExcelReader(ExcelReader):
             df.rename(columns=self.renames, inplace=True)
 
             df = df[["Sponsor", "Protocol", "Protocol ID", "Study Status", "Service", "Service ID", "Service Status", "Price", "Currency", "Discount", "Country"]]
-            df = df[(df['Service Status'] == 'Active') & (df['Currency'] != '')]
+            #df = df[(df['Service Status'] == 'Active') & (df['Currency'] != '')]
 
             #Obtener valor entre " (per" y ")" para crear la columna "Position Type"
             df["Position Type"] = df["Service"].apply(lambda x: str.strip(x.split(" (per")[1].split(")")[0]) if isinstance(x, str) and " (per" in x else "Unknown")

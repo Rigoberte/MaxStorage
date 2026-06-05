@@ -23,9 +23,9 @@ class ErrorSolver:
         else:
             return ""
         
-    def solve_service_id_error(self, protocol_id: str, description: str) -> str | None:
+    def solve_service_id_error(self, protocol: str, description: str) -> str | None:
         """Resuelve un error de protocolo dado su ID."""
-        match = self.df[(self.df["PROTOCOL_ID"] == protocol_id) & (self.df["DESCRIPTION"] == description)]
+        match = self.df[(self.df["PROTOCOL"] == protocol) & (self.df["DESCRIPTION"] == description)]
         if not match.empty:
             return match.iloc[0]["SERVICE_ID"]
         else:
